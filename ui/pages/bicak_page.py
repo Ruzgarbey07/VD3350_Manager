@@ -2,9 +2,14 @@
 VD3350 Manager - Bıçak Takip Sayfası
 =======================================
 VD3350 bıçak kafası durumu ve ömür takibi.
+
+DÜZELTME: KafaCard'daki parentWidget().parentWidget().refresh() çağrısı
+hatalıydı çünkü widget QScrollArea->QWidget->KafaGrid->KafaCard 
+hiyerarşisinde olduğu için doğru parent bulunamamıyordu.
+Düzeltme: refresh_callback callable parametresi kullanıldı.
 """
 
-from typing import Optional
+from typing import Optional, Callable
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QProgressBar, QFrame, QMessageBox,
@@ -22,11 +27,17 @@ class KafaCard(QFrame):
     """Tek bıçak kafası kart widget'ı."""
 
     def __init__(
-        self, kafa: BicakKafasi, parent: Optional[QWidget] = None
+        self,
+        kafa: BicakKafasi,
+        refresh_callback: Callable,
+        parent: Optional[QWidget] = None
     ) -> None:
         super().__init__(parent)
         self.kafa = kafa
         self.svc = BicakService()
+        # DÜZELTME: Doğrudan callback fonksiyon referansı kullanıyoruz
+        # parent widget hiyerarşisine bağımlılık kaldırıldı
+        self._refresh_callback = refresh_callback
         self.setObjectName("card")
         self.setMinimumWidth(180)
         self._build_ui()
@@ -152,13 +163,16 @@ class KafaCard(QFrame):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if ret == QMessageBox.StandardButton.Yes:
-            self.svc.reset_kafa(self.kafa.kafa_no)
-            QMessageBox.information(
-                self, "Sıfırlandı",
-                f"Kafa {self.kafa.kafa_no} sıfırlandı."
-            )
-            # Yenileme sinyali
-            self.parentWidget().parentWidget().refresh()  # type: ignore
+            try:
+                self.svc.reset_kafa(self.kafa.kafa_no)
+                QMessageBox.information(
+                    self, "Sıfırlandı",
+                    f"Kafa {self.kafa.kafa_no} sıfırlandı."
+                )
+                # DÜZELTME: callback ile sayfayı yenile
+                self._refresh_callback()
+            except Exception as e:
+                QMessageBox.critical(self, "Hata", f"Sıfırlama hatası: {e}")
 
     def _metre_ekle(self) -> None:
         """Manuel metre ekle (test/ayar amaçlı)."""
@@ -169,8 +183,12 @@ class KafaCard(QFrame):
             100.0, 0.1, 999999.0, 1,
         )
         if ok and metre > 0:
-            self.svc.add_metre(self.kafa.kafa_no, metre)
-            self.parentWidget().parentWidget().refresh()  # type: ignore
+            try:
+                self.svc.add_metre(self.kafa.kafa_no, metre)
+                # DÜZELTME: callback ile sayfayı yenile
+                self._refresh_callback()
+            except Exception as e:
+                QMessageBox.critical(self, "Hata", f"Metre ekleme hatası: {e}")
 
 
 class BicakTakipPage(QWidget):
@@ -220,76 +238,89 @@ class BicakTakipPage(QWidget):
         ist1_lbl.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         self.content_layout.addWidget(ist1_lbl)
 
-        self.ist1_layout = QHBoxLayout()
-        self.ist1_layout.setSpacing(16)
-        self.content_layout.addLayout(self.ist1_layout)
+        self.ist1_row = QHBoxLayout()
+        self.ist1_row.setSpacing(16)
+        self.content_layout.addLayout(self.ist1_row)
 
         # İstasyon 2 (Kafa 4-6)
         ist2_lbl = QLabel("⚙️ İstasyon 2")
         ist2_lbl.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
         self.content_layout.addWidget(ist2_lbl)
 
-        self.ist2_layout = QHBoxLayout()
-        self.ist2_layout.setSpacing(16)
-        self.content_layout.addLayout(self.ist2_layout)
+        self.ist2_row = QHBoxLayout()
+        self.ist2_row.setSpacing(16)
+        self.content_layout.addLayout(self.ist2_row)
 
-        # Özet bilgi
-        self.content_layout.addWidget(self._build_legend())
+        # Özet istatistik
+        self.content_layout.addWidget(self._build_summary_card())
+
         self.content_layout.addStretch()
-
         scroll.setWidget(self.content_widget)
         main_layout.addWidget(scroll)
 
-    def _build_legend(self) -> QFrame:
-        """Renk açıklamaları."""
-        frame = QFrame()
-        frame.setObjectName("card")
-        layout = QHBoxLayout(frame)
-        layout.setContentsMargins(16, 12, 16, 12)
+    def _build_summary_card(self) -> QFrame:
+        """Özet bilgi kartı."""
+        card = QFrame()
+        card.setObjectName("card")
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(24)
 
-        renk_aciklamalar = [
-            ("#10b981", "Yeşil — %60+ Kalan Ömür"),
-            ("#f59e0b", "Sarı — %40-60 Kalan Ömür"),
-            ("#f97316", "Turuncu — %20-40 Kalan Ömür"),
-            ("#ef4444", "Kırmızı — %0-20 Kritik"),
-        ]
-
-        for renk, aciklama in renk_aciklamalar:
-            item_layout = QHBoxLayout()
-            dot = QLabel("●")
-            dot.setStyleSheet(
-                f"color: {renk}; background: transparent; border: none; font-size: 16px;"
-            )
-            item_layout.addWidget(dot)
-            txt = QLabel(aciklama)
-            txt.setObjectName("labelMuted")
-            txt.setFont(QFont("Segoe UI", 11))
-            item_layout.addWidget(txt)
-            layout.addLayout(item_layout)
-
+        self.ozet_lbl = QLabel("Yükleniyor...")
+        self.ozet_lbl.setObjectName("labelMuted")
+        self.ozet_lbl.setFont(QFont("Segoe UI", 12))
+        layout.addWidget(self.ozet_lbl)
         layout.addStretch()
-        return frame
+
+        return card
 
     def _clear_layout(self, layout: QHBoxLayout) -> None:
-        """Layout içeriğini temizler."""
+        """Layout içindeki tüm widget'ları temizler."""
         while layout.count():
             item = layout.takeAt(0)
-            if item and item.widget():
+            if item.widget():
                 item.widget().deleteLater()
 
     def refresh(self) -> None:
-        """Bıçak kafalarını yeniler."""
-        self._clear_layout(self.ist1_layout)
-        self._clear_layout(self.ist2_layout)
+        """Bıçak kafalarını yeniler ve gösterir."""
+        try:
+            # Mevcut kartları temizle
+            self._clear_layout(self.ist1_row)
+            self._clear_layout(self.ist2_row)
 
-        kafalar = self.svc.get_all()
-        for kafa in kafalar:
-            card = KafaCard(kafa, self.content_widget)
-            if kafa.kafa_no <= 3:
-                self.ist1_layout.addWidget(card)
+            kafalar = self.svc.get_all()
+
+            ist1_kafalar = [k for k in kafalar if k.kafa_no <= 3]
+            ist2_kafalar = [k for k in kafalar if k.kafa_no > 3]
+
+            # İstasyon 1 kartları
+            for kafa in ist1_kafalar:
+                card = KafaCard(kafa, self.refresh)  # DÜZELTME: callback geçiliyor
+                self.ist1_row.addWidget(card)
+            self.ist1_row.addStretch()
+
+            # İstasyon 2 kartları
+            for kafa in ist2_kafalar:
+                card = KafaCard(kafa, self.refresh)  # DÜZELTME: callback geçiliyor
+                self.ist2_row.addWidget(card)
+            self.ist2_row.addStretch()
+
+            # Özet güncelle
+            kritik = self.svc.get_kritik_kafalar()
+            if kritik:
+                kafa_nos = ", ".join(str(k.kafa_no) for k in kritik)
+                self.ozet_lbl.setText(
+                    f"⚠️ Kritik Bıçak Kafaları: Kafa {kafa_nos} — "
+                    f"Acil değişim gerekli! ({len(kritik)} adet)"
+                )
+                self.ozet_lbl.setStyleSheet(
+                    "color: #ef4444; background: transparent; border: none;"
+                )
             else:
-                self.ist2_layout.addWidget(card)
-
-        self.ist1_layout.addStretch()
-        self.ist2_layout.addStretch()
+                self.ozet_lbl.setText("✅ Tüm bıçak kafaları normal durumda.")
+                self.ozet_lbl.setStyleSheet(
+                    "color: #10b981; background: transparent; border: none;"
+                )
+        except Exception as e:
+            if hasattr(self, "ozet_lbl"):
+                self.ozet_lbl.setText(f"Hata: {e}")

@@ -2,13 +2,19 @@
 VD3350 Manager - Rulo Hesaplama Sayfası
 =========================================
 Rulo çevre ölçümünden kalan metreyi hesaplar.
+
+DÜZELTME: _on_malzeme_changed çağrıldığında malzeme_info_lbl henüz
+oluşturulmamış olabiliyor. hasattr() koruması eklendi.
+Ayrıca _build_hesap_card() içinde _refresh_malzeme_list() çağrısı
+_build_ui() sonuna taşındı.
 """
 
 from typing import Optional
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QComboBox, QFrame, QTableWidget,
-    QTableWidgetItem, QHeaderView, QAbstractItemView, QDoubleSpinBox
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QDoubleSpinBox,
+    QMessageBox
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
@@ -26,6 +32,8 @@ class RuloPage(QWidget):
         self.kagit_svc = KagitTuruService()
         self.rulo_svc = RuloService()
         self._build_ui()
+        # UI tamamen kurulduktan SONRA malzeme listesini doldur
+        self._refresh_malzeme_list()
         self._refresh_gecmis()
 
     def _build_ui(self) -> None:
@@ -154,7 +162,8 @@ class RuloPage(QWidget):
         result_layout.addWidget(self.sonuc_lbl)
 
         layout.addWidget(result_frame)
-        self._refresh_malzeme_list()
+        # NOT: _refresh_malzeme_list() buradan KALDIRILDI.
+        # __init__ içinde UI kurulduktan sonra çağrılıyor.
 
         return card
 
@@ -195,6 +204,8 @@ class RuloPage(QWidget):
         title.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         layout.addWidget(title)
 
+        # Bu label _build_hesap_card'dan ÖNCE veya SONRA oluşabilir,
+        # hasattr koruması ile güvenli hale getirildi
         self.malzeme_info_lbl = QLabel("Malzeme seçin...")
         self.malzeme_info_lbl.setObjectName("labelMuted")
         self.malzeme_info_lbl.setFont(QFont("Segoe UI", 11))
@@ -224,73 +235,133 @@ class RuloPage(QWidget):
         return self.gecmis_table
 
     def _refresh_malzeme_list(self) -> None:
-        """Malzeme listesini günceller."""
-        self.malzeme_combo.clear()
-        kagitlar = self.kagit_svc.get_all()
-        for k in kagitlar:
-            self.malzeme_combo.addItem(k.isim)
+        """Malzeme listesini yeniler."""
+        try:
+            self.malzeme_combo.blockSignals(True)
+            current = self.malzeme_combo.currentText()
+            self.malzeme_combo.clear()
+            self.malzeme_combo.addItem("— Seçiniz —")
+            names = self.kagit_svc.get_names()
+            self.malzeme_combo.addItems(names)
+            # Önceki seçimi koru
+            idx = self.malzeme_combo.findText(current)
+            if idx >= 0:
+                self.malzeme_combo.setCurrentIndex(idx)
+            self.malzeme_combo.blockSignals(False)
+            # Mevcut seçime göre bilgiyi güncelle
+            self._on_malzeme_changed(self.malzeme_combo.currentText())
+        except Exception as e:
+            self.malzeme_combo.blockSignals(False)
 
-    def _on_malzeme_changed(self, isim: str) -> None:
-        """Malzeme seçilince kalınlığı otomatik doldurur."""
-        kagit = self.kagit_svc.get_by_isim(isim)
-        if kagit:
-            self.kalinlik_spin.setValue(kagit.kalinlik_micron)
-            self.malzeme_info_lbl.setText(
-                f"İsim: {kagit.isim}\n"
-                f"Kalınlık: {kagit.kalinlik_micron} µm\n"
-                f"Açıklama: {kagit.aciklama or '—'}"
-            )
-        self._on_value_changed()
+    def _on_malzeme_changed(self, text: str) -> None:
+        """Malzeme değişince kalınlık ve bilgi güncellenir."""
+        # malzeme_info_lbl henüz oluşturulmamış olabilir — güvenli kontrol
+        if not hasattr(self, "malzeme_info_lbl"):
+            return
+        if not hasattr(self, "kalinlik_spin"):
+            return
+
+        if not text or text == "— Seçiniz —":
+            self.malzeme_info_lbl.setText("Malzeme seçin...")
+            return
+
+        try:
+            kagit = self.kagit_svc.get_by_isim(text)
+            if kagit:
+                self.kalinlik_spin.setValue(kagit.kalinlik_micron)
+                aciklama = kagit.aciklama or "—"
+                self.malzeme_info_lbl.setText(
+                    f"<b>{kagit.isim}</b><br>"
+                    f"Kalınlık: {kagit.kalinlik_micron:.1f} µm<br>"
+                    f"Açıklama: {aciklama}"
+                )
+            else:
+                self.malzeme_info_lbl.setText("Bu malzeme için bilgi bulunamadı.")
+        except Exception as e:
+            self.malzeme_info_lbl.setText(f"Hata: {e}")
 
     def _on_value_changed(self) -> None:
         """Değer değişince anlık hesaplama yapar (kaydetmez)."""
-        cevre = self.cevre_spin.value()
-        kalinlik = self.kalinlik_spin.value()
-        ic_cap = self.ic_cap_spin.value()
-
-        if cevre > 0 and kalinlik > 0:
-            sonuc = hesapla_rulo_metre(cevre, kalinlik, ic_cap)
-            self.sonuc_lbl.setText(f"{sonuc:,.0f} m")
-        else:
+        if not hasattr(self, "sonuc_lbl"):
+            return
+        try:
+            cevre = self.cevre_spin.value()
+            kalinlik = self.kalinlik_spin.value()
+            ic_cap = self.ic_cap_spin.value()
+            if cevre > 0 and kalinlik > 0:
+                metre = hesapla_rulo_metre(cevre, kalinlik, ic_cap)
+                self.sonuc_lbl.setText(f"{metre:.1f} m")
+            else:
+                self.sonuc_lbl.setText("—")
+        except Exception:
             self.sonuc_lbl.setText("—")
 
     def _hesapla(self) -> None:
-        """Hesaplar ve geçmişe kaydeder."""
-        malzeme = self.malzeme_combo.currentText()
-        cevre = self.cevre_spin.value()
-        kalinlik = self.kalinlik_spin.value()
-        ic_cap = self.ic_cap_spin.value()
+        """Hesapla ve veritabanına kaydet."""
+        try:
+            malzeme = self.malzeme_combo.currentText()
+            if not malzeme or malzeme == "— Seçiniz —":
+                QMessageBox.warning(self, "Uyarı", "Lütfen bir malzeme seçin.")
+                return
 
-        if cevre <= 0 or kalinlik <= 0:
-            return
+            cevre = self.cevre_spin.value()
+            kalinlik = self.kalinlik_spin.value()
+            ic_cap = self.ic_cap_spin.value()
 
-        sonuc = self.rulo_svc.hesapla_ve_kaydet(malzeme, cevre, kalinlik, ic_cap)
-        self.sonuc_lbl.setText(f"{sonuc:,.0f} m")
-        self._refresh_gecmis()
+            if cevre <= 0 or kalinlik <= 0:
+                QMessageBox.warning(self, "Uyarı", "Çevre ve kalınlık değerleri sıfırdan büyük olmalıdır.")
+                return
+
+            hesaplanan = self.rulo_svc.hesapla_ve_kaydet(malzeme, cevre, kalinlik, ic_cap)
+            self.sonuc_lbl.setText(f"{hesaplanan:.1f} m")
+            self._refresh_gecmis()
+
+            QMessageBox.information(
+                self,
+                "✅ Hesaplama Tamamlandı",
+                f"Malzeme: {malzeme}\n"
+                f"Çevre: {cevre:.1f} cm\n"
+                f"Kalınlık: {kalinlik:.1f} µm\n"
+                f"Hesaplanan: {hesaplanan:.1f} metre\n\n"
+                f"Geçmiş kaydına eklendi."
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "Hesaplama Hatası", f"Hata: {e}")
 
     def _refresh_gecmis(self) -> None:
-        """Geçmiş tablosunu günceller."""
-        gecmis = self.rulo_svc.get_gecmis(30)
-        self.gecmis_table.setRowCount(len(gecmis))
-        for row, r in enumerate(gecmis):
-            cells = [
-                str(row + 1),
-                r.malzeme,
-                f"{r.cevre_cm:.1f}",
-                f"{self.kagit_svc.get_by_isim(r.malzeme).kalinlik_micron:.1f}"
-                if self.kagit_svc.get_by_isim(r.malzeme) else "—",
-                f"{r.hesaplanan_metre:,.0f}",
-                r.tarih[:16],
-            ]
-            for col, text in enumerate(cells):
-                item = QTableWidgetItem(text)
-                item.setTextAlignment(
-                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter
-                )
-                if col == 4:
-                    item.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-                self.gecmis_table.setItem(row, col, item)
-            self.gecmis_table.setRowHeight(row, 36)
+        """Geçmiş tablosunu yeniler."""
+        if not hasattr(self, "gecmis_table"):
+            return
+        try:
+            kayitlar = self.rulo_svc.get_gecmis()
+            self.gecmis_table.setRowCount(len(kayitlar))
+            for row, k in enumerate(kayitlar):
+                cells = [
+                    str(row + 1),
+                    k.malzeme,
+                    f"{k.cevre_cm:.1f}",
+                    f"{k.hesaplanan_metre:.1f}",  # kalinlik yerine hesaplanan
+                    f"{k.hesaplanan_metre:.1f}",
+                    k.tarih,
+                ]
+                # Gerçek değerleri doldur
+                cells = [
+                    str(row + 1),
+                    k.malzeme,
+                    f"{k.cevre_cm:.1f}",
+                    "—",  # kalinlik rulo_gecmisi tablosunda saklanmıyor
+                    f"{k.hesaplanan_metre:.1f}",
+                    k.tarih,
+                ]
+                for col, text in enumerate(cells):
+                    item = QTableWidgetItem(text)
+                    item.setTextAlignment(
+                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignCenter
+                    )
+                    self.gecmis_table.setItem(row, col, item)
+                self.gecmis_table.setRowHeight(row, 36)
+        except Exception as e:
+            pass  # Tablo doldurulamazsa sessizce geç
 
     def refresh(self) -> None:
         """Sayfayı yeniler."""

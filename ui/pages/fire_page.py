@@ -2,6 +2,14 @@
 VD3350 Manager - Fire Yönetimi Sayfası
 =========================================
 Fire ve hata kayıtlarının girişi ve görüntülenmesi.
+
+DÜZELTME: FOREIGN KEY constraint failed hatası düzeltildi.
+form_numarasi boş girildiğinde veya is_emirleri tablosunda
+bulunmayan bir değer girildiğinde None olarak kaydediliyordu.
+Artık:
+1. Form no alanı boş bırakılabilir → None olarak kaydedilir
+2. Girilen form no veritabanında kontrol edilir, yoksa None kullanılır
+3. Kullanıcıya açık hata mesajı gösterilir
 """
 
 from typing import Optional
@@ -77,7 +85,9 @@ class FireYonetimPage(QWidget):
         content_layout.addWidget(self._build_stats_card())
 
         # Fire listesi
-        content_layout.addWidget(QLabel("📋 Fire Kayıtları"))
+        list_title = QLabel("📋 Fire Kayıtları")
+        list_title.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+        content_layout.addWidget(list_title)
         content_layout.addWidget(self._build_table())
 
         scroll.setWidget(content)
@@ -103,11 +113,13 @@ class FireYonetimPage(QWidget):
             l.setFont(QFont("Segoe UI", 12))
             return l
 
-        # Form No
+        # Form No — ComboBox ile mevcut iş emirlerinden seçim
         grid.addWidget(lbl("Form Numarası"), 0, 0)
         self.form_no_combo = QComboBox()
         self.form_no_combo.setEditable(True)
-        self.form_no_combo.lineEdit().setPlaceholderText("Form no seçin veya girin...")  # type: ignore
+        self.form_no_combo.lineEdit().setPlaceholderText(  # type: ignore
+            "Boş bırakabilirsiniz (opsiyonel)..."
+        )
         grid.addWidget(self.form_no_combo, 0, 1)
 
         # Tarih
@@ -153,8 +165,9 @@ class FireYonetimPage(QWidget):
 
         # Bilgi notu
         info = QLabel(
-            "ℹ️  Hatalı Metre ve Hatalı Adet alanları bağımsızdır. "
-            "Sadece metre, sadece adet veya ikisi birlikte girilebilir. Boş bırakılabilir."
+            "ℹ️  Form numarası opsiyoneldir. Yalnızca veritabanında kayıtlı "
+            "form numaraları seçilebilir. Hatalı Metre ve Hatalı Adet alanları "
+            "bağımsızdır; sadece metre, sadece adet veya ikisi birlikte girilebilir."
         )
         info.setObjectName("labelMuted")
         info.setFont(QFont("Segoe UI", 11))
@@ -222,16 +235,18 @@ class FireYonetimPage(QWidget):
 
         return self.table
 
-    def _populate_table(self, kayitlar: list[FireKaydi]) -> None:
+    def _populate_table(self, kayitlar: list) -> None:
         """Tabloyu doldurur."""
         self.table.setRowCount(len(kayitlar))
         for row, k in enumerate(kayitlar):
+            metre_str = f"{k.hatali_metre:.2f} m" if k.hatali_metre else "—"
+            adet_str = f"{k.hatali_adet:,} adet" if k.hatali_adet else "—"
             cells = [
                 str(row + 1),
                 k.form_numarasi or "—",
                 k.tarih,
-                f"{k.hatali_metre:.2f} m" if k.hatali_metre else "—",
-                f"{k.hatali_adet:,}" if k.hatali_adet else "—",
+                metre_str,
+                adet_str,
                 k.fire_nedeni or "—",
                 k.aciklama or "—",
             ]
@@ -240,74 +255,157 @@ class FireYonetimPage(QWidget):
                 item.setTextAlignment(
                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
                 )
-                if col == 3 and k.hatali_metre:
-                    item.setForeground(QColor("#ef4444"))
                 self.table.setItem(row, col, item)
-            self.table.setRowHeight(row, 40)
-
-    def _update_stats(self) -> None:
-        """İstatistikleri günceller."""
-        kayitlar = self.fire_svc.get_all()
-        toplam_fire = sum(k.hatali_metre or 0 for k in kayitlar)
-        self.toplam_fire_lbl.setText(f"🗑️  Toplam Fire: {toplam_fire:,.2f} m")
-        self.kayit_sayisi_lbl.setText(f"📋  Toplam Kayıt: {len(kayitlar)}")
-
-        nedenler = self.fire_svc.get_fire_nedenleri()
-        if nedenler:
-            en_cok = nedenler[0]["fire_nedeni"]
-            self.en_cok_neden_lbl.setText(f"📌  En Çok: {en_cok}")
+            self.table.setRowHeight(row, 36)
 
     def _refresh_form_no_list(self) -> None:
-        """Form no listesini günceller."""
-        self.form_no_combo.clear()
-        self.form_no_combo.addItem("")
-        emirler = self.is_svc.get_all()
-        for e in emirler:
-            self.form_no_combo.addItem(e.form_numarasi)
+        """İş emirleri listesini yeniler (FOREIGN KEY için geçerli değerler)."""
+        try:
+            self.form_no_combo.blockSignals(True)
+            current_text = self.form_no_combo.currentText()
+            self.form_no_combo.clear()
+            self.form_no_combo.addItem("")  # Boş seçenek (NULL için)
+            emirler = self.is_svc.get_all()
+            for emri in emirler:
+                self.form_no_combo.addItem(
+                    f"{emri.form_numarasi} — {emri.musteri_adi}"
+                )
+            # Önceki değeri koru
+            idx = self.form_no_combo.findText(current_text)
+            if idx >= 0:
+                self.form_no_combo.setCurrentIndex(idx)
+            elif current_text:
+                self.form_no_combo.setCurrentText(current_text)
+            self.form_no_combo.blockSignals(False)
+        except Exception:
+            self.form_no_combo.blockSignals(False)
+
+    def _get_form_no(self) -> Optional[str]:
+        """
+        Girilen form numarasını döner.
+        DÜZELTME: FOREIGN KEY hatasını önlemek için:
+        1. Boş giriş → None
+        2. "FORM — MÜŞTERİ" formatında giriş → form_no kısmını al
+        3. Girilen değer DB'de yoksa → None (ve kullanıcıya uyarı)
+        """
+        text = self.form_no_combo.currentText().strip()
+
+        # Boş → None (FOREIGN KEY ihlali yok)
+        if not text:
+            return None
+
+        # "IE20240101001 — Müşteri" formatından form_no'yu ayıkla
+        if " — " in text:
+            form_no = text.split(" — ")[0].strip()
+        else:
+            form_no = text
+
+        # Veritabanında var mı kontrol et
+        emri = self.is_svc.get_by_form_no(form_no)
+        if emri:
+            return form_no
+        elif text:
+            # Kullanıcı var olmayan bir form no girmiş
+            ret = QMessageBox.question(
+                self,
+                "Form Numarası Bulunamadı",
+                f"'{form_no}' numaralı iş emri veritabanında bulunamadı.\n\n"
+                f"Form numarasız olarak kaydetmek ister misiniz?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if ret == QMessageBox.StandardButton.Yes:
+                return None
+            else:
+                return "IPTAL"  # İptal işareti
+
+        return None
 
     def _save(self) -> None:
-        """Fire kaydını kaydeder."""
+        """Fire kaydını veritabanına kaydeder."""
+        # Form No — FOREIGN KEY hatası için özel işleme
+        form_no = self._get_form_no()
+        if form_no == "IPTAL":
+            return  # Kullanıcı iptal etti
+
         hatali_metre = self.metre_spin.value() if self.metre_spin.value() > 0 else None
         hatali_adet = self.adet_spin.value() if self.adet_spin.value() > 0 else None
 
+        # En az biri girilmeli
         if hatali_metre is None and hatali_adet is None:
             QMessageBox.warning(
                 self, "Uyarı",
-                "En az 'Hatalı Metre' veya 'Hatalı Adet' girilmelidir."
+                "En az bir değer girilmelidir:\n"
+                "• Hatalı Metre\n"
+                "• Hatalı Adet"
             )
             return
 
-        form_no = self.form_no_combo.currentText().strip() or None
         tarih = self.tarih_edit.date().toString("yyyy-MM-dd")
+        neden = self.neden_combo.currentText()
+        aciklama = self.aciklama_edit.text().strip()
 
         kayit = FireKaydi(
-            form_numarasi=form_no,
+            form_numarasi=form_no,  # None olabilir — FOREIGN KEY ihlali yok
             tarih=tarih,
             hatali_metre=hatali_metre,
             hatali_adet=hatali_adet,
-            fire_nedeni=self.neden_combo.currentText(),
-            aciklama=self.aciklama_edit.text().strip(),
+            fire_nedeni=neden,
+            aciklama=aciklama,
         )
 
         try:
             self.fire_svc.create(kayit)
-            QMessageBox.information(self, "Başarılı", "Fire kaydı oluşturuldu.")
-            self._clear_form()
+            # Formu sıfırla
+            self.form_no_combo.setCurrentIndex(0)
+            self.metre_spin.setValue(0)
+            self.adet_spin.setValue(0)
+            self.aciklama_edit.clear()
             self.refresh()
+            QMessageBox.information(
+                self, "✅ Kaydedildi",
+                f"Fire kaydı başarıyla eklendi.\n"
+                f"Form: {form_no or '(bağlantısız)'}\n"
+                f"Metre: {hatali_metre or '—'}\n"
+                f"Adet: {hatali_adet or '—'}"
+            )
         except Exception as e:
-            QMessageBox.critical(self, "Hata", f"Kayıt hatası: {e}")
-
-    def _clear_form(self) -> None:
-        """Formu temizler."""
-        self.form_no_combo.setCurrentIndex(0)
-        self.tarih_edit.setDate(QDate.currentDate())
-        self.metre_spin.setValue(0)
-        self.adet_spin.setValue(0)
-        self.aciklama_edit.clear()
+            QMessageBox.critical(
+                self, "Kayıt Hatası",
+                f"Fire kaydı eklenirken hata oluştu:\n{e}\n\n"
+                f"İpucu: Form numarası veritabanında kayıtlı olmalıdır "
+                f"veya boş bırakılmalıdır."
+            )
 
     def refresh(self) -> None:
         """Sayfayı yeniler."""
-        self._refresh_form_no_list()
-        kayitlar = self.fire_svc.get_all()
-        self._populate_table(kayitlar)
-        self._update_stats()
+        try:
+            # Form no listesini güncelle
+            self._refresh_form_no_list()
+
+            # Kayıtları getir
+            kayitlar = self.fire_svc.get_all()
+            self._populate_table(kayitlar)
+
+            # İstatistikleri güncelle
+            toplam_fire = sum(
+                k.hatali_metre for k in kayitlar if k.hatali_metre
+            )
+            self.toplam_fire_lbl.setText(
+                f"🗑️  Toplam Fire: {toplam_fire:.2f} m"
+            )
+            self.kayit_sayisi_lbl.setText(
+                f"📋  Toplam Kayıt: {len(kayitlar)}"
+            )
+
+            # En çok görülen neden
+            nedenler = self.fire_svc.get_fire_nedenleri()
+            if nedenler:
+                en_cok = nedenler[0]
+                self.en_cok_neden_lbl.setText(
+                    f"📌  En Çok: {en_cok['fire_nedeni']} ({en_cok['adet']}x)"
+                )
+            else:
+                self.en_cok_neden_lbl.setText("📌  En Çok: —")
+
+        except Exception as e:
+            pass

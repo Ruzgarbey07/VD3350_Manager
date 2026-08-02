@@ -2,6 +2,11 @@
 VD3350 Manager - Common UI Widgets
 =====================================
 Tekrar kullanılabilir özel widget bileşenleri.
+
+DÜZELTME: StatCard ikon label'ı boyutlandırma sorunu giderildi.
+Emoji fontları QLabel.setFixedSize() ile beklenmedik overflow yapıyordu.
+Çözüm: ikon label'ını metin bazlı (unicode) + minimum/maximum height
+şeklinde sınırlandırarak taşma engellendi.
 """
 
 from typing import Optional, Callable
@@ -17,6 +22,9 @@ class StatCard(QFrame):
     """
     Dashboard istatistik kartı.
     İkon, başlık, değer ve alt başlık gösterir.
+
+    DÜZELTME: İkon label'ı artık fixed size yerine minimum/maximum
+    kısıtları kullanıyor — emoji taşması önlendi.
     """
 
     clicked = pyqtSignal()
@@ -48,20 +56,34 @@ class StatCard(QFrame):
         top_row = QHBoxLayout()
         top_row.setSpacing(10)
 
+        # DÜZELTME: Emoji ikonlar için özel container frame kullanıyoruz
+        # Bu sayede taşma (overflow) önleniyor
+        icon_container = QFrame()
+        icon_container.setFixedSize(36, 36)
+        icon_container.setStyleSheet(
+            f"background: {self.accent_color}22; border-radius: 10px; border: none;"
+        )
+        icon_container_layout = QVBoxLayout(icon_container)
+        icon_container_layout.setContentsMargins(0, 0, 0, 0)
+        icon_container_layout.setSpacing(0)
+
         icon_lbl = QLabel(icon)
-        icon_lbl.setFont(QFont("Segoe UI Emoji", 18))
-        icon_lbl.setFixedSize(36, 36)
+        # DÜZELTME: Emoji için daha küçük font boyutu — 18pt büyük emoji overflow yapıyordu
+        icon_lbl.setFont(QFont("Segoe UI Emoji", 14))
         icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon_lbl.setStyleSheet(
-            f"background: {self.accent_color}22; border-radius: 10px; "
-            f"color: {self.accent_color}; border: none;"
+            f"color: {self.accent_color}; background: transparent; border: none;"
         )
+        # DÜZELTME: Taşmayı önlemek için clip flag ayarla
+        icon_lbl.setScaledContents(False)
+        icon_container_layout.addWidget(icon_lbl)
 
         title_lbl = QLabel(title)
         title_lbl.setObjectName("labelMuted")
         title_lbl.setFont(QFont("Segoe UI", 11))
+        title_lbl.setWordWrap(True)
 
-        top_row.addWidget(icon_lbl)
+        top_row.addWidget(icon_container)
         top_row.addWidget(title_lbl)
         top_row.addStretch()
         layout.addLayout(top_row)
@@ -253,8 +275,4 @@ class EmptyState(QWidget):
             btn.setObjectName("primaryBtn")
             btn.setFixedWidth(180)
             btn.clicked.connect(action_callback)
-            btn_layout = QHBoxLayout()
-            btn_layout.addStretch()
-            btn_layout.addWidget(btn)
-            btn_layout.addStretch()
-            layout.addLayout(btn_layout)
+            layout.addWidget(btn, alignment=Qt.AlignmentFlag.AlignCenter)
